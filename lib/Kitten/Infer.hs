@@ -61,7 +61,7 @@ typeFragment fragment = do
             Just decl -> return decl
             Nothing -> do
               origin <- getsProgram inferenceOrigin
-              fmap mono . forAll $ \r s -> TyFunction r s origin
+              fmap mono . forAll $ \r s e -> TyFunction r s e origin
         saveDefWith (flip const) (defName def) inferredScheme
         instanceCheck inferredScheme declaredScheme $ let
           item = CompileError (defLocation def)
@@ -81,7 +81,7 @@ typeFragment fragment = do
 
     -- Equate the bottom of the stack with stackTypes.
     do
-      let TyFunction consumption _ _ = fragmentType
+      let TyFunction consumption _ _ _ = fragmentType
       bottom <- freshVarM
       enforce <- asksConfig configEnforceBottom
       when enforce $ bottom === TyEmpty (Origin HiNone topLevel)
@@ -126,13 +126,15 @@ typeFragment fragment = do
 instanceCheck :: TypeScheme -> TypeScheme -> ErrorGroup -> K ()
 instanceCheck inferredScheme declaredScheme errorGroup = do
   inferredType <- instantiateM inferredScheme
-  (stackConsts, scalarConsts, declaredType) <- skolemize declaredScheme
+  (stackConsts, scalarConsts, rowConsts, declaredType) <- skolemize declaredScheme
   inferredType === declaredType
   let
-    (escapedStacks, escapedScalars) = free inferredScheme <> free declaredScheme
+    (escapedStacks, escapedScalars, escapedRows)
+      = free inferredScheme <> free declaredScheme
     badStacks = filter (`elem` escapedStacks) stackConsts
     badScalars = filter (`elem` escapedScalars) scalarConsts
-  unless (null badStacks && null badScalars)
+    badRows = filter (`elem` escapedRows) rowConsts
+  unless (null badStacks && null badScalars && null badRows)
     $ liftFailWriter $ throwMany [errorGroup]
 
 -- Note [scheming defs]:
@@ -172,15 +174,16 @@ infer finalProgram resolved = case resolved of
 
   TrCompose hint terms loc -> withLocation loc $ do
     (typedTerms, types) <- V.mapAndUnzipM recur terms
+    effect <- freshVarM
     r <- freshVarM
     origin <- getsProgram inferenceOrigin
     let
       composed = foldM
         (\x y -> do
-          TyFunction a b _ <- unquantify x
-          TyFunction c d _ <- unquantify y
-          inferCompose a b c d)
-        ((r --> r) origin)
+          TyFunction a b c _ <- unquantify x
+          TyFunction d e f _ <- unquantify y
+          inferCompose a b c d e f)
+        ((r --> r) effect origin)
         (V.toList types)
 
     -- We need the generalized type to check stack effects.
@@ -190,10 +193,11 @@ infer finalProgram resolved = case resolved of
     -- Check stack effect hint.
     case hint of
       Stack0 -> do
+        e <- freshVarM
         s <- freshStackIdM
         instanceCheck typeScheme
-          (Forall (S.singleton s) S.empty
-            $ (TyVar s origin --> TyVar s origin) origin)
+          (Forall (S.singleton s) S.empty S.empty
+            $ (TyVar s origin --> TyVar s origin) e origin)
           $ ErrorGroup
           [ CompileError loc Error $ T.unwords
             [ toText typeScheme
@@ -201,6 +205,7 @@ infer finalProgram resolved = case resolved of
             ]
           ]
       Stack1 -> do
+        e <- freshVarM
         s <- freshStackIdM
         a <- freshScalarIdM
         -- Note that 'a' is not forall-bound. We want this effect hint
@@ -210,9 +215,9 @@ infer finalProgram resolved = case resolved of
         -- care very much that the stack type is immaterial. In the
         -- latter, we don't care what the type is at all.
         instanceCheck typeScheme
-          (Forall (S.singleton s) S.empty
+          (Forall (S.singleton s) S.empty S.empty
             $ (TyVar s origin
-              --> TyVar s origin :. TyVar a origin) origin)
+              --> TyVar s origin :. TyVar a origin) e origin)
           $ ErrorGroup
           [ CompileError loc Error $ T.unwords
             [ toText typeScheme
@@ -225,9 +230,9 @@ infer finalProgram resolved = case resolved of
 
   TrIntrinsic name loc -> asTyped (TrIntrinsic name) loc $ case name of
 
-    InAddVector -> forAll $ \r a
+    InAddVector -> forAll $ \r a e
       -> (r :. TyVector a o :. TyVector a o
-      --> r :. TyVector a o) o
+      --> r :. TyVector a o) e o
 
     InAddFloat -> binary (tyFloat o) o
 
@@ -237,23 +242,23 @@ infer finalProgram resolved = case resolved of
 
     InAndInt -> binary (tyInt o) o
 
-    InApply -> forAll $ \r s
-      -> TyFunction (r :. TyFunction r s o) s o
+    InApply -> forAll $ \r s e
+      -> TyFunction (r :. TyFunction r s e o) s e o
 
-    InCharToInt -> forAll $ \r
-      -> (r :. tyChar o --> r :. tyInt o) o
+    InCharToInt -> forAll $ \r e
+      -> (r :. tyChar o --> r :. tyInt o) e o
 
-    InChoice -> forAll $ \r a b -> TyFunction
-      (r :. (a :| b) :. TyFunction (r :. a) r o) r o
+    InChoice -> forAll $ \r a b e -> TyFunction
+      (r :. (a :| b) :. TyFunction (r :. a) r e o) r e o
 
-    InChoiceElse -> forAll $ \r a b s -> TyFunction
+    InChoiceElse -> forAll $ \r a b s e -> TyFunction
       (r :. (a :| b)
-        :. TyFunction (r :. a) s o
-        :. TyFunction (r :. b) s o)
-      s o
+        :. TyFunction (r :. a) s e o
+        :. TyFunction (r :. b) s e o)
+      s e o
 
     InClose -> forAll $ \r
-      -> (r :. tyHandle o --> r) o
+      -> (r :. tyHandle o --> r) (tyIo o) o
 
     InDivFloat -> binary (tyFloat o) o
     InDivInt -> binary (tyInt o) o
@@ -262,55 +267,55 @@ infer finalProgram resolved = case resolved of
     InEqInt -> relational (tyInt o) o
 
     InExit -> forAll $ \r s
-      -> (r :. tyInt o --> s) o
+      -> (r :. tyInt o --> s) (tyIo o) o
 
-    InFirst -> forAll $ \r a b
-      -> (r :. a :& b --> r :. a) o
+    InFirst -> forAll $ \r a b e
+      -> (r :. a :& b --> r :. a) e o
 
-    InFromLeft -> forAll $ \r a b
-      -> (r :. a :| b --> r :. a) o
+    InFromLeft -> forAll $ \r a b e
+      -> (r :. a :| b --> r :. a) e o
 
-    InFromRight -> forAll $ \r a b
-      -> (r :. a :| b --> r :. b) o
+    InFromRight -> forAll $ \r a b e
+      -> (r :. a :| b --> r :. b) e o
 
-    InFromSome -> forAll $ \r a
-      -> (r :. (a :?) --> r :. a) o
+    InFromSome -> forAll $ \r a e
+      -> (r :. (a :?) --> r :. a) e o
 
     InGeFloat -> relational (tyFloat o) o
     InGeInt -> relational (tyInt o) o
 
-    InGet -> forAll $ \r a
-      -> (r :. TyVector a o :. tyInt o --> r :. (a :?)) o
+    InGet -> forAll $ \r a e
+      -> (r :. TyVector a o :. tyInt o --> r :. (a :?)) e o
 
     InGetLine -> forAll $ \r
-      -> (r :. tyHandle o --> r :. string o) o
+      -> (r :. tyHandle o --> r :. string o) (tyIo o) o
 
     InGtFloat -> relational (tyFloat o) o
     InGtInt -> relational (tyInt o) o
 
-    InIf -> forAll $ \r -> TyFunction
-      (r :. tyBool o :. TyFunction r r o) r o
+    InIf -> forAll $ \r e -> TyFunction
+      (r :. tyBool o :. TyFunction r r e o) r e o
 
-    InIfElse -> forAll $ \r s -> TyFunction
+    InIfElse -> forAll $ \r s e -> TyFunction
       (r :. tyBool o
-        :. TyFunction r s o
-        :. TyFunction r s o)
-      s o
+        :. TyFunction r s e o
+        :. TyFunction r s e o)
+      s e o
 
-    InInit -> forAll $ \r a
-      -> (r :. TyVector a o --> r :. TyVector a o) o
+    InInit -> forAll $ \r a e
+      -> (r :. TyVector a o --> r :. TyVector a o) e o
 
-    InIntToChar -> forAll $ \r
-      -> (r :. tyInt o --> r :. (tyChar o :?)) o
+    InIntToChar -> forAll $ \r e
+      -> (r :. tyInt o --> r :. (tyChar o :?)) e o
 
     InLeFloat -> relational (tyFloat o) o
     InLeInt -> relational (tyInt o) o
 
-    InLeft -> forAll $ \r a b
-      -> (r :. a --> r :. a :| b) o
+    InLeft -> forAll $ \r a b e
+      -> (r :. a --> r :. a :| b) e o
 
-    InLength -> forAll $ \r a
-      -> (r :. TyVector a o --> r :. tyInt o) o
+    InLength -> forAll $ \r a e
+      -> (r :. TyVector a o --> r :. tyInt o) e o
 
     InLtFloat -> relational (tyFloat o) o
     InLtInt -> relational (tyInt o) o
@@ -327,67 +332,67 @@ infer finalProgram resolved = case resolved of
     InNegFloat -> unary (tyFloat o) o
     InNegInt -> unary (tyInt o) o
 
-    InNone -> forAll $ \r a
-      -> (r --> r :. (a :?)) o
+    InNone -> forAll $ \r a e
+      -> (r --> r :. (a :?)) e o
 
     InNotBool -> unary (tyBool o) o
     InNotInt -> unary (tyInt o) o
 
     InOpenIn -> forAll $ \r
-      -> (r :. string o --> r :. tyHandle o) o
+      -> (r :. string o --> r :. tyHandle o) (tyIo o) o
 
     InOpenOut -> forAll $ \r
-      -> (r :. string o --> r :. tyHandle o) o
+      -> (r :. string o --> r :. tyHandle o) (tyIo o) o
 
-    InOption -> forAll $ \r a -> TyFunction
-      (r :. (a :?) :. TyFunction (r :. a) r o) r o
+    InOption -> forAll $ \r a e -> TyFunction
+      (r :. (a :?) :. TyFunction (r :. a) r e o) r e o
 
-    InOptionElse -> forAll $ \r a s -> TyFunction
+    InOptionElse -> forAll $ \r a s e -> TyFunction
       (r :. (a :?)
-        :. TyFunction (r :. a) s o
-        :. TyFunction r s o)
-      s o
+        :. TyFunction (r :. a) s e o
+        :. TyFunction r s e o)
+      s e o
 
     InOrBool -> binary (tyBool o) o
     InOrInt -> binary (tyInt o) o
 
-    InRest -> forAll $ \r a b
-      -> (r :. a :& b --> r :. b) o
+    InRest -> forAll $ \r a b e
+      -> (r :. a :& b --> r :. b) e o
 
-    InRight -> forAll $ \r a b
-      -> (r :. b --> r :. a :| b) o
+    InRight -> forAll $ \r a b e
+      -> (r :. b --> r :. a :| b) e o
 
-    InSet -> forAll $ \r a
+    InSet -> forAll $ \r a e
       -> (r :. TyVector a o :. tyInt o :. a
-      --> r :. TyVector a o) o
+      --> r :. TyVector a o) e o
 
-    InShowFloat -> forAll $ \r
-      -> (r :. tyFloat o --> r :. string o) o
+    InShowFloat -> forAll $ \r e
+      -> (r :. tyFloat o --> r :. string o) e o
 
-    InShowInt -> forAll $ \r
-      -> (r :. tyInt o --> r :. string o) o
+    InShowInt -> forAll $ \r e
+      -> (r :. tyInt o --> r :. string o) e o
 
-    InSome -> forAll $ \r a
-      -> (r :. a --> r :. (a :?)) o
+    InSome -> forAll $ \r a e
+      -> (r :. a --> r :. (a :?)) e o
 
-    InStderr -> forAll $ \r
-      -> (r --> r :. tyHandle o) o
-    InStdin -> forAll $ \r
-      -> (r --> r :. tyHandle o) o
-    InStdout -> forAll $ \r
-      -> (r --> r :. tyHandle o) o
+    InStderr -> forAll $ \r e
+      -> (r --> r :. tyHandle o) e o
+    InStdin -> forAll $ \r e
+      -> (r --> r :. tyHandle o) e o
+    InStdout -> forAll $ \r e
+      -> (r --> r :. tyHandle o) e o
 
     InSubFloat -> binary (tyFloat o) o
     InSubInt -> binary (tyInt o) o
 
-    InPair -> forAll $ \r a b
-      -> (r :. a :. b --> r :. a :& b) o
+    InPair -> forAll $ \r a b e
+      -> (r :. a :. b --> r :. a :& b) e o
 
     InPrint -> forAll $ \r
-      -> (r :. string o :. tyHandle o --> r) o
+      -> (r :. string o :. tyHandle o --> r) (tyIo o) o
 
-    InTail -> forAll $ \r a
-      -> (r :. TyVector a o --> r :. TyVector a o) o
+    InTail -> forAll $ \r a e
+      -> (r :. TyVector a o --> r :. TyVector a o) e o
 
     InXorBool -> binary (tyBool o) o
     InXorInt -> binary (tyInt o) o
@@ -398,29 +403,30 @@ infer finalProgram resolved = case resolved of
 
   TrLambda name term loc -> withOrigin (Origin (HiLocal name) loc) $ do
     a <- freshVarM
-    (term', TyFunction b c _) <- local a $ recur term
+    (term', TyFunction b c e _) <- local a $ recur term
     origin <- getsProgram inferenceOrigin
-    let type_ = TyFunction (b :. a) c origin
+    let type_ = TyFunction (b :. a) c e origin
     return (TrLambda name term' (loc, sub finalProgram type_), type_)
 
   TrMakePair x y loc -> withLocation loc $ do
     (x', a) <- secondM fromConstant =<< recur x
     (y', b) <- secondM fromConstant =<< recur y
     origin <- getsProgram inferenceOrigin
-    type_ <- forAll $ \r -> (r --> r :. a :& b) origin
+    type_ <- forAll $ \r e -> (r --> r :. a :& b) e origin
     return (TrMakePair x' y' (loc, sub finalProgram type_), type_)
 
   TrPush value loc -> withLocation loc $ do
     (value', a) <- inferValue finalProgram value
     origin <- getsProgram inferenceOrigin
-    type_ <- forAll $ \r -> (r --> r :. a) origin
+    type_ <- forAll $ \r e -> (r --> r :. a) e origin
     return (TrPush value' (loc, sub finalProgram type_), type_)
 
   TrMakeVector values loc -> withLocation loc $ do
     (typedValues, types) <- V.mapAndUnzipM recur values
     elementType <- fromConstant =<< unifyEach types
     origin <- getsProgram inferenceOrigin
-    type_ <- forAll $ \r -> (r --> r :. TyVector elementType origin) origin
+    type_ <- forAll $ \r e ->
+      (r --> r :. TyVector elementType origin) e origin
     return
       ( TrMakeVector typedValues (loc, sub finalProgram type_)
       , type_
@@ -447,21 +453,22 @@ fromConstant :: Type Scalar -> K (Type Scalar)
 fromConstant type_ = do
   a <- freshVarM
   r <- freshVarM
+  e <- freshVarM
   origin <- getsProgram inferenceOrigin
-  type_ === (r --> r :. a) origin
+  type_ === (r --> r :. a) e origin
   return a
 
 binary :: Type Scalar -> Origin -> K (Type Scalar)
 binary a origin = forAll
-  $ \r -> (r :. a :. a --> r :. a) origin
+  $ \r e -> (r :. a :. a --> r :. a) e origin
 
 relational :: Type Scalar -> Origin -> K (Type Scalar)
 relational a origin = forAll
-  $ \r -> (r :. a :. a --> r :. tyBool origin) origin
+  $ \r e -> (r :. a :. a --> r :. tyBool origin) e origin
 
 unary :: Type Scalar -> Origin -> K (Type Scalar)
 unary a origin = forAll
-  $ \r -> (r :. a --> r :. a) origin
+  $ \r e -> (r :. a --> r :. a) e origin
 
 string :: Origin -> Type Scalar
 string origin = TyVector (tyChar origin) origin
@@ -519,9 +526,10 @@ unifyEach xs = go 0
         go (i + 1)
 
 inferCompose
-  :: Type Stack -> Type Stack
-  -> Type Stack -> Type Stack
+  :: Type Stack -> Type Stack -> Type EffRow
+  -> Type Stack -> Type Stack -> Type EffRow
   -> K (Type Scalar)
-inferCompose in1 out1 in2 out2 = do
+inferCompose in1 out1 e1 in2 out2 e2 = do
   out1 === in2
-  TyFunction in1 out2 <$> getsProgram inferenceOrigin
+  e1 === e2
+  TyFunction in1 out2 e1 <$> getsProgram inferenceOrigin

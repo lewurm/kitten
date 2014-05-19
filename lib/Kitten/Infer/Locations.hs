@@ -16,13 +16,17 @@ diagnosticLocations
   :: (ToText (Type a)) => Type a -> [(Location, Textable)]
 diagnosticLocations type_ = case type_ of
   a :& b -> locations a ++ locations b
+  a :+ b -> locations a ++ locations b
   a :. b -> locations a ++ locations b
   (:?) a -> locations a
   a :| b -> locations a ++ locations b
   TyConst _ loc -> yield loc
   TyCtor _ loc -> yield loc
+  TyEff _ loc -> yield loc
   TyEmpty loc -> yield loc
-  TyFunction r s loc -> yield loc ++ locations r ++ locations s
+  TyFunction r s e loc -> concat
+    [yield loc, locations r, locations s, locations e]
+  TyPure loc -> yield loc
   TyQuantified _ loc -> yield loc
   TyVar _ loc -> yield loc
   TyVector a loc -> yield loc ++ locationsIfUnhinted loc a

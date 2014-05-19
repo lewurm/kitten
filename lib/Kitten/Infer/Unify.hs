@@ -3,6 +3,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -13,8 +14,10 @@ module Kitten.Infer.Unify
   , unifyVar
   ) where
 
+import Control.Applicative
 import Control.Monad
 import Data.Function
+import Data.Maybe
 import Data.Monoid
 import Data.Text (Text)
 
@@ -67,7 +70,8 @@ instance Unification Scalar where
     (a :& b, c :& d) -> unify b d program >>= unify a c
     ((:?) a, (:?) b) -> unify a b program
     (a :| b, c :| d) -> unify b d program >>= unify a c
-    (TyFunction a b _, TyFunction c d _) -> unify b d program >>= unify a c
+    (TyFunction a b c _, TyFunction d e f _)
+      -> unify b e program >>= unify a d >>= unify c f
     (TyVector a _, TyVector b _) -> unify a b program
     (TyVar var (Origin hint _), type_) -> unifyVar var (type_ `addHint` hint) program
     (_, TyVar{}) -> commutative
@@ -80,6 +84,90 @@ instance Unification Scalar where
       (originLocation $ inferenceOrigin program) type1 type2
 
     where commutative = unification type2 type1 program
+
+instance Unification EffRow where
+  unification type1 type2 program = case (type1, type2) of
+    _ | type1 == type2 -> Right program
+    (l :+ r, s)
+      | Just (rewritten, substitution, program') <- rowIso program l s
+      -> if fromMaybe False $ occurs
+        <$> (unkinded . fst <$> substitution)
+        <*> pure program
+        <*> pure (effectTail r)
+        then Left $ unificationError Nothing
+          (originLocation $ inferenceOrigin program) type1 type2
+        else let
+          program'' = maybe id (uncurry declare) substitution program'
+          s' = effectTail rewritten
+          in unify r s' program''
+    (_, _ :+ _) -> commutative
+    (TyVar var (Origin hint _), type_) -> unifyVar var (type_ `addHint` hint) program
+    (_, TyVar{}) -> commutative
+    _ -> Left $ unificationError Nothing
+      (originLocation $ inferenceOrigin program) type1 type2
+    where commutative = unification type2 type1 program
+
+instance Unification Eff where
+  unification type1 type2 program
+    = if type1 == type2
+      then Right program
+      else Left $ unificationError Nothing
+        (originLocation $ inferenceOrigin program) type1 type2
+
+effectTail :: Type EffRow -> Type EffRow
+effectTail (_ :+ a) = a
+effectTail a = a
+
+rowIso
+  :: Program
+  -> Type Eff
+  -> Type EffRow
+  -> Maybe (Type EffRow, Maybe (KindedId EffRow, Type EffRow), Program)
+
+-- head
+rowIso p lin rin@(l :+ _) | l == lin
+  = return (rin, Nothing, p)
+
+-- swap
+rowIso p l (l' :+ r) | l /= l' = do
+  (r', substitution, p') <- rowIso p l r
+  return (l :+ l' :+ r', substitution, p')
+
+-- row-var
+rowIso p l (TyVar a o) = let
+  (b, p') = freshVar o p
+  res = l :+ b
+  in return (res, Just (a, res), p')
+
+rowIso _ _ _ = Nothing
+
+{-
+rowIso p lin (l1 :+ r1) (l2 :+ r2)
+  | l1 == lin && l1 == l2 && r1 == r2 = (Nothing, p)
+rowIso p lin (l'1 :+ r) (l :+ l'2 :+ r')
+  | l == lin && l'1 /= l && l'1 == l'2
+  = rowIso p lin r (l :+ r')
+rowIso p lin (TyVar a) (l :+ _) = let
+  (b, p') = freshVar (inferenceOrigin p) p
+  in (Just (a, l :+ b), p')
+-}
+
+{-
+rewriteEffect
+  :: Type Eff
+  -> Type EffRow
+  -> Program
+  -> Maybe (Type Eff, Type EffRow, Maybe (KindedId EffRow), Program)
+
+rewriteEffect a (e :+ r) program
+  = Just $ if a == e
+    then (a, e :+ r, Nothing, program)
+    else (e, a :+ r, Nothing, program)
+rewriteEffect a (TyVar var _) program = let
+  (x, program') = freshVar (inferenceOrigin program) program
+  in Just (a, x, Just var, declare var (a :+ x) program')
+rewriteEffect _ _ _ = Nothing
+-}
 
 unificationError
   :: forall (a :: Kind). (ReifyKind a, TidyType a, ToText (Type a))

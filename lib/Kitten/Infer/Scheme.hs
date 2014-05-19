@@ -18,13 +18,11 @@ module Kitten.Infer.Scheme
   , generalize
   , instantiate
   , instantiateM
-  , normalize
   , occurs
   , skolemize
   ) where
 
 import Control.Applicative hiding (Const)
-import Control.Arrow
 import Control.Monad
 import Control.Monad.Trans.State.Strict
 import Control.Monad.Trans.Writer
@@ -53,12 +51,12 @@ instantiate
   -> TypeScheme
   -> Program
   -> (Type Scalar, Program)
-instantiate origin@(Origin _ _) (Forall stacks scalars type_) program
+instantiate origin@(Origin _ _) (Forall stacks scalars rows type_) program
   = (sub renamed type_, program')
 
   where
   (renamed, program') = flip runState program
-    $ composeM [renames stacks, renames scalars] emptyProgram
+    $ composeM [renames stacks, renames scalars, renames rows] emptyProgram
 
   renames
     :: (Declare a, Fresh a)
@@ -91,12 +89,19 @@ generalize action = do
 
     scalars :: [KindedId Scalar]
     stacks :: [KindedId Stack]
-    (stacks, scalars) = (filter dependent *** filter dependent)
-      (freeVars substituted)
+    (stacks, scalars, rows) = let
+      three
+        :: (a -> a') -> (b -> b') -> (c -> c')
+        -> (a, b, c) -> (a', b', c')
+      three f g h (a, b, c) = (f a, g b, h c)
+      d :: (Occurrences a, ReifyKind a, Unbound a) => [KindedId a] -> [KindedId a]
+      d = filter dependent
+      in three d d d (freeVars substituted)
 
   return . (,) extra . regeneralize after $ Forall
     (S.fromList stacks)
     (S.fromList scalars)
+    (S.fromList rows)
     substituted
 
 -- | Tests whether a variable is dependent between two type
@@ -131,6 +136,15 @@ instance Unbound Stack where
     $ let n = envMaxStack env in [n, pred n .. Id 0]
     -- See note [enumerating unbound names].
 
+instance Unbound EffRow where
+  unbound env = map KindedId
+    $ filter (`Id.notMember` inferenceRows env)
+    $ let n = envMaxRow env in [n, pred n .. Id 0]
+    -- See note [enumerating unbound names].
+
+instance Unbound Eff where
+  unbound _ = []
+
 -- | The last allocated name in an environment. Relies on
 -- the fact that 'NameGen' allocates names sequentially.
 envMaxScalar :: Program -> Id TypeSpace
@@ -139,6 +153,10 @@ envMaxScalar = unkinded . pred . fst . genKinded . programScalarIdGen
 -- | See 'envMaxScalar'.
 envMaxStack :: Program -> Id TypeSpace
 envMaxStack = unkinded . pred . fst . genKinded . programStackIdGen
+
+-- | See 'envMaxScalar'.
+envMaxRow :: Program -> Id TypeSpace
+envMaxRow = unkinded . pred . fst . genKinded . programRowIdGen
 
 -- Note [enumerating unbound names]:
 --
@@ -150,14 +168,14 @@ data TypeLevel = TopLevel | NonTopLevel
   deriving (Eq)
 
 regeneralize :: Program -> TypeScheme -> TypeScheme
-regeneralize program (Forall stacks scalars wholeType) = let
+regeneralize program (Forall stacks scalars rows wholeType) = let
   (type_, vars) = runWriter $ regeneralize' TopLevel wholeType
-  in Forall (foldr S.delete stacks vars) scalars type_
+  in Forall (foldr S.delete stacks vars) scalars rows type_
   where
   regeneralize'
     :: forall a. TypeLevel -> Type a -> Writer [KindedId Stack] (Type a)
   regeneralize' level type_ = case type_ of
-    TyFunction a b loc
+    TyFunction a b _ loc
       | level == NonTopLevel
       , TyVar c _ <- bottommost a
       , TyVar d _ <- bottommost b
@@ -171,11 +189,12 @@ regeneralize program (Forall stacks scalars wholeType) = let
           (unkinded c) program wholeType == 2)
           $ tell [c]
         return $ TyQuantified
-          (Forall (S.singleton c) S.empty type_)
+          (Forall (S.singleton c) S.empty S.empty type_)
           loc
-    TyFunction a b loc -> TyFunction
+    TyFunction a b e loc -> TyFunction
       <$> regeneralize' NonTopLevel a
       <*> regeneralize' NonTopLevel b
+      <*> pure e
       <*> pure loc
     a :. b -> (:.)
       <$> regeneralize' NonTopLevel a
@@ -190,54 +209,54 @@ regeneralize program (Forall stacks scalars wholeType) = let
 freeVars
   :: (Free (Type a))
   => Type a
-  -> ([KindedId Stack], [KindedId Scalar])
+  -> ([KindedId Stack], [KindedId Scalar], [KindedId EffRow])
 freeVars type_
-  = let (stacks, scalars) = free type_
-  in (nub stacks, nub scalars)
+  = let (stacks, scalars, rows) = free type_
+  in (nub stacks, nub scalars, nub rows)
 
 class Free a where
-  free :: a -> ([KindedId Stack], [KindedId Scalar])
+  free :: a -> ([KindedId Stack], [KindedId Scalar], [KindedId EffRow])
 
 instance Free (Type Stack) where
-  free type_ = case type_ of
+  free = \case
     a :. b -> free a <> free b
-    TyConst name _ -> ([name], [])
+    TyConst name _ -> ([name], [], [])
     TyEmpty{} -> mempty
-    TyVar name _ -> ([name], [])
+    TyVar name _ -> ([name], [], [])
 
 instance Free (Type Scalar) where
-  free type_ = case type_ of
+  free = \case
     a :& b -> free a <> free b
     (:?) a -> free a
     a :| b -> free a <> free b
-    TyFunction a b _ -> free a <> free b
-    TyConst name _ -> ([], [name])
+    TyFunction a b e _ -> free a <> free b <> free e
+    TyConst name _ -> ([], [name], [])
     TyCtor{} -> mempty
-    TyQuantified (Forall r s t) _
-      -> let (stacks, scalars) = free t
-      in (stacks \\ S.toList r, scalars \\ S.toList s)
-    TyVar name _ -> ([], [name])
+    TyQuantified (Forall stacks scalars rows type_) _
+      -> let (stacks', scalars', rows') = free type_
+      in
+        ( stacks' \\ S.toList stacks
+        , scalars' \\ S.toList scalars
+        , rows' \\ S.toList rows
+        )
+    TyVar name _ -> ([], [name], [])
     TyVector a _ -> free a
 
-instance Free TypeScheme where
-  free (Forall stacks scalars type_) = let
-    (stacks', scalars') = free type_
-    in (stacks' \\ S.toList stacks, scalars' \\ S.toList scalars)
+instance Free (Type EffRow) where
+  free = \case
+    _ :+ a -> free a
+    TyConst name _ -> ([], [], [name])
+    TyPure{} -> ([], [], [])
+    TyVar name _ -> ([], [], [name])
 
-normalize :: Origin -> Type Scalar -> Type Scalar
-normalize origin@(Origin _ _) type_ = let
-  (stacks, scalars) = freeVars type_
-  stackCount = length stacks
-  program = emptyProgram
-    { inferenceStacks = Id.fromList
-      $ zip (map unkinded stacks) (map var [0..])
-    , inferenceScalars = Id.fromList
-      $ zip (map unkinded scalars) (map var [stackCount..])
-    }
-  in sub program type_
-  where
-  var :: Int -> Type a
-  var index = TyVar (KindedId (Id index)) origin
+instance Free TypeScheme where
+  free (Forall stacks scalars rows type_) = let
+    (stacks', scalars', rows') = free type_
+    in
+      ( stacks' \\ S.toList stacks
+      , scalars' \\ S.toList scalars
+      , rows' \\ S.toList rows
+      )
 
 occurs
   :: forall a
@@ -249,7 +268,7 @@ class Occurrences a where
   occurrences :: Kind -> Id TypeSpace -> Program -> Type a -> Int
 
 instance Occurrences Stack where
-  occurrences kind name program type_ = case type_ of
+  occurrences kind name program = \case
     a :. b -> recur a + recur b
     TyConst typeName@(KindedId name') _ -> case retrieve program typeName of
       Left{} -> if kind == Stack && name == name' then 1 else 0
@@ -263,11 +282,11 @@ instance Occurrences Stack where
     recur = occurrences kind name program
 
 instance Occurrences Scalar where
-  occurrences kind name program type_ = case type_ of
+  occurrences kind name program = \case
     a :& b -> recur a + recur b
     (:?) a -> recur a
     a :| b -> recur a + recur b
-    TyFunction a b _ -> recur a + recur b
+    TyFunction a b _ _ -> recur a + recur b
     TyConst typeName@(KindedId name') _ -> case retrieve program typeName of
       Left{} -> if kind == Scalar && name == name' then 1 else 0
       Right type' -> recur type'
@@ -275,12 +294,29 @@ instance Occurrences Scalar where
     TyVar typeName@(KindedId name') _ -> case retrieve program typeName of
       Left{} -> if kind == Scalar && name == name' then 1 else 0
       Right type' -> recur type'
-    TyQuantified (Forall _ s t) _
+    TyQuantified (Forall _ s _ t) _
       -> if KindedId name `S.member` s then 0 else recur t
     TyVector a _ -> recur a
     where
     recur :: (Occurrences a) => Type a -> Int
     recur = occurrences kind name program
+
+instance Occurrences EffRow where
+  occurrences kind name program = \case
+    a :+ b -> recur a + recur b
+    TyConst typeName@(KindedId name') _ -> case retrieve program typeName of
+      Left{} -> if name == name' then 1 else 0
+      Right type_ -> recur type_
+    TyPure{} -> 0
+    TyVar typeName@(KindedId name') _ -> case retrieve program typeName of
+      Left{} -> if name == name' then 1 else 0
+      Right type_ -> recur type_
+    where
+    recur :: (Occurrences a) => Type a -> Int
+    recur = occurrences kind name program
+
+instance Occurrences Eff where
+  occurrences _ _ _ _ = 0
 
 class Simplify a where
   simplify :: Program -> Type a -> Type a
@@ -299,6 +335,16 @@ instance Simplify Scalar where
       -> simplify program type' `addHint` hint
     _ -> type_
 
+instance Simplify EffRow where
+  simplify program type_ = case type_ of
+    TyVar name (Origin hint _loc)
+      | Right type' <- retrieve program name
+      -> simplify program type' `addHint` hint
+    _ -> type_
+
+instance Simplify Eff where
+  simplify _ type_ = type_
+
 class Substitute a where
   sub :: Program -> Type a -> Type a
 
@@ -315,23 +361,35 @@ instance Substitute Stack where
 
 instance Substitute Scalar where
   sub program type_ = case type_ of
-    TyFunction a b origin -> TyFunction
+    TyFunction a b e origin -> TyFunction
       (sub program a)
       (sub program b)
+      (sub program e)
       origin
     a :& b -> sub program a :& sub program b
     (:?) a -> (sub program a :?)
     a :| b -> sub program a :| sub program b
     TyConst{} -> type_  -- See Note [Constant Substitution].
     TyCtor{} -> type_
-    TyQuantified (Forall r s t) loc
-      -> TyQuantified (Forall r s (sub program t)) loc
+    TyQuantified (Forall r s e t) loc
+      -> TyQuantified (Forall r s e (sub program t)) loc
     TyVar name (Origin hint _loc)
       | Right type' <- retrieve program name
       -> sub program type' `addHint` hint
       | otherwise
       -> type_
     TyVector a origin -> TyVector (sub program a) origin
+
+instance Substitute EffRow where
+  sub program type_ = case type_ of
+    a :+ b -> a :+ sub program b
+    TyConst{} -> type_  -- See Note [Constant Substitution].
+    TyPure{} -> type_
+    TyVar name (Origin hint _loc)
+      | Right type' <- retrieve program name
+      -> sub program type' `addHint` hint
+      | otherwise
+      -> type_
 
 -- Note [Constant Substitution]:
 --
@@ -345,8 +403,8 @@ instance Substitute Scalar where
 -- constants and the skolemized type.
 skolemize
   :: TypeScheme
-  -> K ([KindedId Stack], [KindedId Scalar], Type Scalar)
-skolemize (Forall stackVars scalarVars type_) = do
+  -> K ([KindedId Stack], [KindedId Scalar], [KindedId EffRow], Type Scalar)
+skolemize (Forall stackVars scalarVars rowVars type_) = do
   origin <- getsProgram inferenceOrigin
   let
     declares
@@ -357,18 +415,25 @@ skolemize (Forall stackVars scalarVars type_) = do
       $ zip (S.toList vars) (map (\name -> TyConst name origin) consts)
   scalarConsts <- replicateM (S.size scalarVars) freshScalarIdM
   stackConsts <- replicateM (S.size stackVars) freshStackIdM
+  rowConsts <- replicateM (S.size rowVars) freshRowIdM
   program <- getsProgram
     $ declares scalarVars scalarConsts
     . declares stackVars stackConsts
-  (stackConsts', scalarConsts', type') <- skolemizeType (sub program type_)
-  return (stackConsts ++ stackConsts', scalarConsts ++ scalarConsts', type')
+  (stackConsts', scalarConsts', rowConsts', type')
+    <- skolemizeType (sub program type_)
+  return
+    ( stackConsts ++ stackConsts'
+    , scalarConsts ++ scalarConsts'
+    , rowConsts ++ rowConsts'
+    , type'
+    )
 
 skolemizeType
   :: Type a
-  -> K ([KindedId Stack], [KindedId Scalar], Type a)
+  -> K ([KindedId Stack], [KindedId Scalar], [KindedId EffRow], Type a)
 skolemizeType = \case
-  TyFunction a b origin -> do
-    (stackConsts, scalarConsts, b') <- skolemizeType b
-    return (stackConsts, scalarConsts, TyFunction a b' origin)
+  TyFunction a b e origin -> do
+    (stackConsts, scalarConsts, rowConsts, b') <- skolemizeType b
+    return (stackConsts, scalarConsts, rowConsts, TyFunction a b' e origin)
   TyQuantified scheme _ -> skolemize scheme
-  type_ -> return ([], [], type_)
+  type_ -> return ([], [], [], type_)

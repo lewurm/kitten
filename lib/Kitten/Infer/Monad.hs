@@ -42,6 +42,10 @@ instance Declare Scalar where
   declare (KindedId i) type_ program = program
     { inferenceScalars = Id.insert i type_ (inferenceScalars program) }
 
+instance Declare EffRow where
+  declare (KindedId i) type_ program = program
+    { inferenceRows = Id.insert i type_ (inferenceRows program) }
+
 class Retrieve a where
   retrieve :: Program -> KindedId a -> Either ErrorGroup (Type a)
 
@@ -54,6 +58,11 @@ instance Retrieve Scalar where
   retrieve Program{..} (KindedId name)
     = flip maybeToEither (Id.lookup name inferenceScalars)
     $ nonexistent "scalar" inferenceOrigin name
+
+instance Retrieve EffRow where
+  retrieve Program{..} (KindedId name)
+    = flip maybeToEither (Id.lookup name inferenceRows)
+    $ nonexistent "effect row" inferenceOrigin name
 
 nonexistent :: Text -> Origin -> Id n -> ErrorGroup
 nonexistent kind (Origin _ loc) name
@@ -77,6 +86,11 @@ instance Fresh Scalar where
 instance Fresh Stack where
   fresh constructor origin program
     = let (typeId, program') = freshStackId program
+    in (constructor typeId origin, program')
+
+instance Fresh EffRow where
+  fresh constructor origin program
+    = let (typeId, program') = freshRowId program
     in (constructor typeId origin, program')
 
 freshConst

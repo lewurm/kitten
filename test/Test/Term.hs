@@ -135,7 +135,7 @@ spec = do
         , word "option___else_" ] ])
         { fragmentDefs = defList
           [ defWithAnno "option___else_"
-            (AnFunction V.empty V.empty)
+            (AnFunction V.empty V.empty V.empty)
             $ compose [] ] }
 
     testTermFailure ":"
@@ -190,7 +190,9 @@ spec = do
           (V.fromList
             [AnFunction
               (V.fromList [AnVar "int"])
-              (V.fromList [AnVar "int"])]))
+              (V.fromList [AnVar "int"])
+              V.empty])
+          V.empty)
         $ compose
           [ lambda "x"
             [ push $ quotation

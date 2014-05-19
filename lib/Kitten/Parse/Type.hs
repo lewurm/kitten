@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Kitten.Parse.Type
@@ -40,23 +41,27 @@ quantified thing = do
   variable :: Parser (Either Text Text)
   variable = Left <$> (dot *> word) <|> Right <$> word
 
-dot :: Parser Token
+dot, plus :: Parser Token
 dot = match (TkOperator ".")
+plus = match (TkOperator "+")
 
 functionType :: Parser AnType
 functionType = (<?> "function type") $ choice
-  [ AnStackFunction <$> (dot *> word) <*> left <*> (dot *> word) <*> right
-  , AnFunction <$> left <*> right
+  [ AnStackFunction
+    <$> (dot *> word) <*> left <*> (dot *> word) <*> right <*> effect
+  , AnFunction <$> left <*> right <*> effect
   ]
   where
   left, right :: Parser (Vector AnType)
   left = manyV baseType <* match TkArrow
   right = manyV type_
+  effect :: Parser (Vector Text)
+  effect = option V.empty $ plus *> (word `sepByV` plus)
 
 baseType :: Parser AnType
 baseType = (<?> "base type") $ do
   prefix <- choice
-    [ AnVar <$> word
+    [ AnVar <$> (notFollowedBy plus *> word)
     , vector
     , try $ grouped type_
     ]

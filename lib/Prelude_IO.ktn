@@ -7,7 +7,7 @@ def handleClose (handle ->):
   __close
 
 // Reads a line from a handle.
-def handleGetLine (handle -> [char]):
+def handleGetLine (handle -> [char] +io):
   __get_line
 
 // Writes a string to a handle.
@@ -19,7 +19,7 @@ def newline (->):
   "\n" print
 
 // Opens a file for input.
-def openInput ([char] -> handle):
+def openInput ([char] -> handle +io):
   __open_in
 
 // Opens a file for output.

@@ -10,6 +10,7 @@ module Kitten.Infer.Type
 import Control.Applicative
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State
+import Data.Either
 import Data.Map (Map)
 import Data.Monoid
 import Data.Text (Text)
@@ -23,6 +24,7 @@ import Kitten.Error
 import Kitten.Location
 import Kitten.Types
 import Kitten.Util.FailWriter
+import Kitten.Util.Text (toText)
 
 data Env = Env
   { envAnonStacks :: [KindedId Stack]
@@ -30,12 +32,10 @@ data Env = Env
   -- 'Anno.Function' constructor.
 
   , envStacks :: !(Map Text (KindedId Stack))
-  -- ^ Map from stack variable names to stack variables
-  -- themselves.
+  -- ^ Map from stack variable names to stack variables.
 
   , envScalars :: !(Map Text (KindedId Scalar))
-  -- ^ Map from scalar variable names to scalar variables
-  -- themselves.
+  -- ^ Map from scalar variable names to scalar variables.
   }
 
 type Converted a = StateT Env K a
@@ -51,6 +51,7 @@ fromAnno annotated (Anno annoType annoLoc) = do
   return $ Forall
     (S.fromList (envAnonStacks env <> M.elems (envStacks env)))
     (S.fromList . M.elems $ envScalars env)
+    S.empty
     type_
   where
 
@@ -63,11 +64,11 @@ fromAnno annotated (Anno annoType annoLoc) = do
     AnChoice a b -> (:|)
       <$> fromAnnoType' HiNone a
       <*> fromAnnoType' HiNone b
-    AnFunction a b -> do
+    AnFunction a b e -> do
       r <- lift freshStackIdM
       let rVar = TyVar r origin
-      scheme <- Forall (S.singleton r) S.empty
-        <$> makeFunction origin rVar a rVar b
+      scheme <- Forall (S.singleton r) S.empty S.empty
+        <$> makeFunction origin rVar a rVar b e
       return $ TyQuantified scheme origin
     AnOption a -> (:?)
       <$> fromAnnoType' HiNone a
@@ -80,6 +81,7 @@ fromAnno annotated (Anno annoType annoLoc) = do
       scheme <- Forall
         (S.fromList (V.toList stackVars))
         (S.fromList (V.toList scalarVars))
+        S.empty
         <$> fromAnnoType' HiNone type_
       return $ TyQuantified scheme origin
       where
@@ -93,10 +95,11 @@ fromAnno annotated (Anno annoType annoLoc) = do
         modify $ \env -> env
           { envStacks = M.insert name var (envStacks env) }
         return var
-    AnStackFunction leftStack leftScalars rightStack rightScalars -> do
+    AnStackFunction leftStack leftScalars rightStack rightScalars effects -> do
       leftStackVar <- annoStackVar leftStack loc annotated
       rightStackVar <- annoStackVar rightStack loc annotated
-      makeFunction origin leftStackVar leftScalars rightStackVar rightScalars
+      makeFunction origin
+        leftStackVar leftScalars rightStackVar rightScalars effects
     AnVar name -> annoScalarVar name loc annotated
     AnVector a -> TyVector <$> fromAnnoType' HiNone a <*> pure origin
     where
@@ -111,17 +114,41 @@ fromAnno annotated (Anno annoType annoLoc) = do
     -> Vector AnType
     -> Type Stack
     -> Vector AnType
+    -> Vector Text
     -> Converted (Type Scalar)
-  makeFunction origin leftStack leftScalars rightStack rightScalars = TyFunction
-    <$> (V.foldl' (:.) leftStack <$> V.mapM fromInput leftScalars)
-    <*> (V.foldl' (:.) rightStack <$> V.mapM fromOutput rightScalars)
-    <*> pure origin
+  makeFunction origin leftStack leftScalars rightStack rightScalars effects = do
+    (consts, vars) <- partitionEithers . V.toList <$> V.mapM fromEffect effects
+    e <- case vars of
+      [] -> TyVar <$> lift freshRowIdM <*> pure origin
+      [var] -> return var
+      _ -> lift . liftFailWriter . throwMany . (:[]) . ErrorGroup
+        $ item Error
+          "multiple effect variables on one function"
+        : map (item Note . toText) vars  -- TODO More precise source locations.
+        where item = CompileError (originLocation origin)
+    TyFunction
+      <$> (V.foldl' (:.) leftStack <$> V.mapM fromInput leftScalars)
+      <*> (V.foldl' (:.) rightStack <$> V.mapM fromOutput rightScalars)
+      <*> pure (foldr (:+) e consts)
+      <*> pure origin
+
+  fromEffect :: Text -> Converted (Either (Type Eff) (Type EffRow))
+  fromEffect name = annoEffectVar name annoLoc annotated
 
 fromAnno _ TestAnno = error "cannot make type from test annotation"
 
+annoEffectVar
+  :: Text
+  -> Location
+  -> Annotated
+  -> Converted (Either (Type Eff) (Type EffRow))
+annoEffectVar name loc annotated = case name of
+  "io" -> return $ Left (TyEff EffIo origin)
+  _ -> unknown name loc
+  where origin = Origin (HiVar name annotated) loc
+
 -- | Gets a scalar variable by name from the environment.
-annoScalarVar
-  :: Text -> Location -> Annotated -> Converted (Type Scalar)
+annoScalarVar :: Text -> Location -> Annotated -> Converted (Type Scalar)
 annoScalarVar name loc annotated = do
   existing <- gets $ M.lookup name . envScalars
   case existing of
@@ -136,8 +163,7 @@ annoScalarVar name loc annotated = do
   where origin = Origin (HiVar name annotated) loc
 
 -- | Gets a stack variable by name from the environment.
-annoStackVar
-  :: Text -> Location -> Annotated -> Converted (Type Stack)
+annoStackVar :: Text -> Location -> Annotated -> Converted (Type Stack)
 annoStackVar name loc annotated = do
   existing <- gets $ M.lookup name . envStacks
   case existing of

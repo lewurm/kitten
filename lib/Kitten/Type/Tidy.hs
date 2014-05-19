@@ -45,6 +45,12 @@ instance TidyType Scalar where
 instance TidyType Stack where
   tidyType = tidyStackType
 
+instance TidyType EffRow where
+  tidyType = return  -- TODO
+
+instance TidyType Eff where
+  tidyType = return  -- TODO
+
 emptyKindState :: TidyKindState a
 emptyKindState = TidyKindState
   { ids = Id.empty
@@ -99,14 +105,16 @@ tidyScalarType type_ = case type_ of
   t1 :| t2 -> (:|) <$> tidyScalarType t1 <*> tidyScalarType t2
   TyConst i loc -> TyConst <$> tidyScalar i <*> pure loc
   TyCtor{} -> pure type_
-  TyFunction r1 r2 loc -> TyFunction
+  TyFunction r1 r2 e loc -> TyFunction
     <$> tidyStackType r1
     <*> tidyStackType r2
+    <*> pure e  -- TODO tidyEffectType
     <*> pure loc
-  TyQuantified (Forall r s t) loc -> TyQuantified
+  TyQuantified (Forall r s e t) loc -> TyQuantified
     <$> (Forall
       <$> Set.mapM tidyStack r
       <*> Set.mapM tidyScalar s
+      <*> pure e  -- TODO Set.mapM tidyRow s
       <*> tidyScalarType t)
     <*> pure loc
   TyVar i loc -> TyVar <$> tidyScalar i <*> pure loc

@@ -56,6 +56,7 @@ data Program = Program
   , programDefIdGen :: !DefIdGen
   , programFixities :: !(HashMap Text Fixity)
   , programOperators :: [Operator]
+  , programRowIdGen :: !(KindedGen EffRow)
   , programScalarIdGen :: !(KindedGen Scalar)
   , programStackIdGen :: !(KindedGen Stack)
   , programSymbols :: !(HashMap Text DefId)
@@ -65,6 +66,7 @@ data Program = Program
   , inferenceDecls :: !(HashMap Text TypeScheme)
   , inferenceLocals :: [Type Scalar]
   , inferenceOrigin :: !Origin
+  , inferenceRows :: !(TypeIdMap (Type EffRow))
   , inferenceScalars :: !(TypeIdMap (Type Scalar))
   , inferenceStacks :: !(TypeIdMap (Type Stack))
   }
@@ -154,6 +156,7 @@ emptyProgram = Program
   , programDefIdGen = mkIdGenFrom (succ entryId)
   , programFixities = H.empty
   , programOperators = []
+  , programRowIdGen = mkKindedGen
   , programScalarIdGen = mkKindedGen
   , programStackIdGen = mkKindedGen
   , programSymbols = H.empty
@@ -165,6 +168,7 @@ emptyProgram = Program
     { locationStart = initialPos "<unknown>"
     , locationIndent = 0
     }
+  , inferenceRows = Id.empty
   , inferenceScalars = Id.empty
   , inferenceStacks = Id.empty
   }
@@ -179,6 +183,14 @@ freshDefId program = let
 
 freshDefIdM :: K (DefId)
 freshDefIdM = liftState $ state freshDefId
+
+freshRowId :: Program -> (KindedId EffRow, Program)
+freshRowId program = let
+  (i, gen') = genKinded (programRowIdGen program)
+  in (i, program { programRowIdGen = gen' })
+
+freshRowIdM :: K (KindedId EffRow)
+freshRowIdM = liftState $ state freshRowId
 
 freshScalarId :: Program -> (KindedId Scalar, Program)
 freshScalarId program = let
@@ -451,7 +463,7 @@ intrinsicToTextTable = V.map swap intrinsicFromTextTable
 --------------------------------------------------------------------------------
 -- Kinds
 
-data Kind = Scalar | Stack
+data Kind = Scalar | Stack | Eff | EffRow
   deriving (Eq)
 
 -- | A helper data type for reification of a kind type,
@@ -470,22 +482,39 @@ instance ReifyKind Stack where
 instance ReifyKind Scalar where
   reifyKind _ = Scalar
 
+instance ReifyKind Eff where
+  reifyKind _ = Eff
+
+instance ReifyKind EffRow where
+  reifyKind _ = EffRow
+
 instance ToText Kind where
-  toText Stack = "stack"
-  toText Scalar = "scalar"
+  toText = \case
+    Stack -> "stack"
+    Scalar -> "scalar"
+    Eff -> "effect"
+    EffRow -> "effect row"
 
 --------------------------------------------------------------------------------
 -- Typing
 
 data Type (a :: Kind) where
   (:&) :: !(Type Scalar) -> !(Type Scalar) -> Type Scalar
+  (:+) :: !(Type Eff) -> !(Type EffRow) -> Type EffRow
   (:.) :: !(Type Stack) -> !(Type Scalar) -> Type Stack
   (:?) :: !(Type Scalar) -> Type Scalar
   (:|) :: !(Type Scalar) -> !(Type Scalar) -> Type Scalar
   TyConst :: !(KindedId a) -> !Origin -> Type a
   TyCtor :: !Ctor -> !Origin -> Type Scalar
+  TyEff :: !EffCtor -> !Origin -> Type Eff
   TyEmpty :: !Origin -> Type Stack
-  TyFunction :: !(Type Stack) -> !(Type Stack) -> !Origin -> Type Scalar
+  TyFunction
+    :: !(Type Stack)
+    -> !(Type Stack)
+    -> !(Type EffRow)
+    -> !Origin
+    -> Type Scalar
+  TyPure :: !Origin -> Type EffRow
   TyQuantified :: !TypeScheme -> !Origin -> Type Scalar
   TyVar :: !(KindedId a) -> !Origin -> Type a
   TyVector :: !(Type Scalar) -> !Origin -> Type Scalar
@@ -516,15 +545,34 @@ instance ToText Ctor where
 instance Show Ctor where
   show = T.unpack . toText
 
+data EffCtor
+  = EffIo
+  deriving (Eq)
+
+tyIo :: Origin -> Type EffRow
+tyIo o = TyEff EffIo o :+ TyPure o
+
+instance ToText EffCtor where
+  toText = \case
+    EffIo -> "io"
+
+instance Show EffCtor where
+  show = T.unpack . toText
+
 instance Eq (Type a) where
   (a :& b) == (c :& d) = (a, b) == (c, d)
+  (a :+ b :+ c) == (d :+ e :+ f)
+    = (a == d && b == e || a == e && b == e) && c == f
+  (a :+ b) == (c :+ d) = (a, b) == (c, d)
   (a :. b) == (c :. d) = (a, b) == (c, d)
   (:?) a == (:?) b = a == b
   (a :| b) == (c :| d) = (a, b) == (c, d)
   TyConst a _ == TyConst b _ = a == b
   TyCtor a _ == TyCtor b _ = a == b
+  TyEff a _ == TyEff b _ = a == b
   TyEmpty{} == TyEmpty{} = True
-  TyFunction a b _ == TyFunction c d _ = (a, b) == (c, d)
+  TyFunction a b c _ == TyFunction d e f _ = (a, b, c) == (d, e, f)
+  TyPure{} == TyPure{} = True
   TyQuantified a _ == TyQuantified b _ = a == b
   TyVar a _ == TyVar b _ = a == b
   TyVector a _ == TyVector b _ = a == b
@@ -545,8 +593,8 @@ instance ToText (Type Scalar) where
     TyConst (KindedId (Id i)) o
       -> "t" <> showText i <> suffix o  -- TODO Show differently?
     TyCtor name o -> toText name <> suffix o
-    TyFunction r1 r2 o -> T.concat
-      [ "(", T.unwords [toText r1, "->", toText r2], ")"
+    TyFunction r1 r2 e o -> T.concat
+      [ "(", T.unwords [toText r1, "->", toText r2, "+", toText e], ")"
       , suffix o
       ]
     TyQuantified scheme _ -> toText scheme
@@ -562,6 +610,24 @@ instance ToText (Type Stack) where
     TyEmpty o -> "<empty>" <> suffix o
     TyVar (KindedId (Id i)) o
       -> ".s" <> showText i <> suffix o
+
+instance ToText (Type Eff) where
+  toText = \case
+    TyConst (KindedId (Id i)) o
+      -> "e" <> showText i <> suffix o
+    TyEff name o -> toText name <> suffix o
+    TyVar (KindedId (Id i)) o
+      -> "e" <> showText i <> suffix o
+
+instance ToText (Type EffRow) where
+  toText = \case
+    (a :+ TyPure{}) -> toText a
+    (a :+ b) -> T.unwords [toText a, "+", toText b]
+    TyConst (KindedId (Id i)) o
+      -> ".e" <> showText i <> suffix o
+    TyPure{} -> "()"
+    TyVar (KindedId (Id i)) o
+      -> ".e" <> showText i <> suffix o
 
 suffix :: Origin -> Text
 suffix (Origin hint _) = case hint of
@@ -651,6 +717,7 @@ data StackHint
 data Scheme a = Forall
   (Set (KindedId Stack))
   (Set (KindedId Scalar))
+  (Set (KindedId EffRow))
   a
   deriving (Eq, Foldable, Functor, Traversable)
 
@@ -658,13 +725,14 @@ instance (ToText a) => Show (Scheme a) where
   show = T.unpack . toText
 
 instance (ToText a) => ToText (Scheme a) where
-  toText (Forall stacks scalars type_) = T.unwords
+  toText (Forall stacks scalars rows type_) = T.unwords
     $ (if null variables then id else (("forall" : variables ++ ["."]) ++))
     [toText type_]
 
     where
     variables :: [Text]
-    variables = wordSetText stacks ++ wordSetText scalars
+    variables = concat
+      [wordSetText stacks, wordSetText scalars, wordSetText rows]
 
     wordSetText :: Set (KindedId a) -> [Text]
     wordSetText = map toText . S.toList
@@ -672,15 +740,17 @@ instance (ToText a) => ToText (Scheme a) where
 type TypeScheme = Scheme (Type Scalar)
 
 infix 6 :&
+infixr 7 :+
 infix 6 :|
 infixl 5 :.
 infix 4 -->
 
 -- | Creates a 'Function' scalar type, inferring hints from
 -- the given 'Origin'.
-hintedFunction :: Type Stack -> Type Stack -> Origin -> Type Scalar
-hintedFunction inputs outputs origin
-  = TyFunction inputs' outputs' origin
+hintedFunction
+  :: Type Stack -> Type Stack -> Type EffRow -> Origin -> Type Scalar
+hintedFunction inputs outputs effect origin
+  = TyFunction inputs' outputs' effect origin
   where
   inputs', outputs' :: Type Stack
   (inputs', outputs') = case origin of
@@ -690,19 +760,22 @@ hintedFunction inputs outputs origin
       )
     _ -> (inputs, outputs)
 
-(-->) :: Type Stack -> Type Stack -> Origin -> Type Scalar
-(a --> b) origin = hintedFunction a b origin
+(-->) :: Type Stack -> Type Stack -> Type EffRow -> Origin -> Type Scalar
+(-->) = hintedFunction
 
 addHint :: Type a -> Hint -> Type a
 addHint type_ hint = case type_ of
   _ :& _ -> type_
+  _ :+ _ -> type_
   _ :. _ -> type_
   (:?) _ -> type_
   _ :| _ -> type_
+  TyEff name o -> TyEff name (f o)
   TyEmpty o -> TyEmpty (f o)
   TyConst i o -> TyConst i (f o)
   TyCtor ctor o -> TyCtor ctor (f o)
-  TyFunction r1 r2 o -> TyFunction r1 r2 (f o)
+  TyFunction r1 r2 e o -> TyFunction r1 r2 e (f o)
+  TyPure o -> TyPure (f o)
   TyQuantified scheme o -> TyQuantified scheme o
   TyVar i o -> TyVar i (f o)
   TyVector t o -> TyVector t (f o)
@@ -726,7 +799,7 @@ bottommost type_ = case type_ of
   _ -> type_
 
 mono :: a -> Scheme a
-mono = Forall S.empty S.empty
+mono = Forall S.empty S.empty S.empty
 
 stackVar :: TypeId -> KindedId Stack
 stackVar = KindedId
@@ -735,7 +808,7 @@ scalarVar :: TypeId -> KindedId Scalar
 scalarVar = KindedId
 
 unscheme :: Scheme a -> a
-unscheme (Forall _ _ x) = x
+unscheme (Forall _ _ _ x) = x
 
 --------------------------------------------------------------------------------
 -- Tokens
@@ -895,12 +968,13 @@ instance Eq Anno where
   Anno type1 loc1 == Anno type2 loc2 = (type1, loc1) == (type2, loc2)
 
 data AnType
-  = AnFunction !(Vector AnType) !(Vector AnType)
+  = AnFunction !(Vector AnType) !(Vector AnType) !(Vector Text)
   | AnChoice !AnType !AnType
   | AnOption !AnType
   | AnPair !AnType !AnType
   | AnQuantified !(Vector Text) !(Vector Text) !AnType
-  | AnStackFunction !Text !(Vector AnType) !Text !(Vector AnType)
+  | AnStackFunction
+    !Text !(Vector AnType) !Text !(Vector AnType) !(Vector Text)
   | AnVar !Text
   | AnVector !AnType
   deriving (Eq, Show)
