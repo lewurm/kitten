@@ -19,7 +19,7 @@ def eofCell (-> int): -1
 // Utilities
 
 // FIXME(strager): Bad approximation.
-def getCharApprox (-> char?):
+def getCharApprox (-> char? +io):
   getLine head
 
 ////////////////////////////////////////////////////////////
@@ -192,7 +192,7 @@ def progSort (-> [char]):
 ////////////////////////////////////////////////////////////
 // Debugging
 
-def dumpMemory ([int] int ->):
+def dumpMemory ([int] int -> +io):
   -> ram ramc;
 
   "Memory:" say

@@ -257,8 +257,8 @@ infer finalProgram resolved = case resolved of
         :. TyFunction (r :. b) s e o)
       s e o
 
-    InClose -> forAll $ \r
-      -> (r :. tyHandle o --> r) (tyIo o) o
+    InClose -> forAll $ \r e
+      -> (r :. tyHandle o --> r) (tyIo o e) o
 
     InDivFloat -> binary (tyFloat o) o
     InDivInt -> binary (tyInt o) o
@@ -266,8 +266,8 @@ infer finalProgram resolved = case resolved of
     InEqFloat -> relational (tyFloat o) o
     InEqInt -> relational (tyInt o) o
 
-    InExit -> forAll $ \r s
-      -> (r :. tyInt o --> s) (tyIo o) o
+    InExit -> forAll $ \r s e
+      -> (r :. tyInt o --> s) (tyExit o e) o
 
     InFirst -> forAll $ \r a b e
       -> (r :. a :& b --> r :. a) e o
@@ -287,8 +287,8 @@ infer finalProgram resolved = case resolved of
     InGet -> forAll $ \r a e
       -> (r :. TyVector a o :. tyInt o --> r :. (a :?)) e o
 
-    InGetLine -> forAll $ \r
-      -> (r :. tyHandle o --> r :. string o) (tyIo o) o
+    InGetLine -> forAll $ \r e
+      -> (r :. tyHandle o --> r :. string o) (tyIo o e) o
 
     InGtFloat -> relational (tyFloat o) o
     InGtInt -> relational (tyInt o) o
@@ -338,11 +338,11 @@ infer finalProgram resolved = case resolved of
     InNotBool -> unary (tyBool o) o
     InNotInt -> unary (tyInt o) o
 
-    InOpenIn -> forAll $ \r
-      -> (r :. string o --> r :. tyHandle o) (tyIo o) o
+    InOpenIn -> forAll $ \r e
+      -> (r :. string o --> r :. tyHandle o) (tyIo o e) o
 
-    InOpenOut -> forAll $ \r
-      -> (r :. string o --> r :. tyHandle o) (tyIo o) o
+    InOpenOut -> forAll $ \r e
+      -> (r :. string o --> r :. tyHandle o) (tyIo o e) o
 
     InOption -> forAll $ \r a e -> TyFunction
       (r :. (a :?) :. TyFunction (r :. a) r e o) r e o
@@ -388,8 +388,8 @@ infer finalProgram resolved = case resolved of
     InPair -> forAll $ \r a b e
       -> (r :. a :. b --> r :. a :& b) e o
 
-    InPrint -> forAll $ \r
-      -> (r :. string o :. tyHandle o --> r) (tyIo o) o
+    InPrint -> forAll $ \r e
+      -> (r :. string o :. tyHandle o --> r) (tyIo o e) o
 
     InTail -> forAll $ \r a e
       -> (r :. TyVector a o --> r :. TyVector a o) e o

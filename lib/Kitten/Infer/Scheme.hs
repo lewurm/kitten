@@ -419,6 +419,7 @@ skolemize (Forall stackVars scalarVars rowVars type_) = do
   program <- getsProgram
     $ declares scalarVars scalarConsts
     . declares stackVars stackConsts
+    . declares rowVars rowConsts
   (stackConsts', scalarConsts', rowConsts', type')
     <- skolemizeType (sub program type_)
   return

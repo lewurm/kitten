@@ -31,6 +31,12 @@ data Env = Env
   -- ^ Anonymous stacks implicit on both sides of an
   -- 'Anno.Function' constructor.
 
+  , envRow :: !(Type EffRow)
+  -- ^ The default implicit row.
+
+  , envRows :: !(Map Text (KindedId EffRow))
+  -- ^ Map from effect variable names to effect variables.
+
   , envStacks :: !(Map Text (KindedId Stack))
   -- ^ Map from stack variable names to stack variables.
 
@@ -42,8 +48,11 @@ type Converted a = StateT Env K a
 
 fromAnno :: Annotated -> Anno -> K (Scheme (Type Scalar))
 fromAnno annotated (Anno annoType annoLoc) = do
+  row <- TyVar <$> freshRowIdM <*> pure (Origin (HiType annotated) annoLoc)
   (type_, env) <- flip runStateT Env
     { envAnonStacks = []
+    , envRow = row
+    , envRows = M.empty
     , envStacks = M.empty
     , envScalars = M.empty
     } $ fromAnnoType' (HiType annotated) annoType
@@ -75,16 +84,22 @@ fromAnno annotated (Anno annoType annoLoc) = do
     AnPair a b -> (:&)
       <$> fromAnnoType' HiNone a
       <*> fromAnnoType' HiNone b
-    AnQuantified stacks scalars type_ -> do
+    AnQuantified stacks scalars rows type_ -> do
       stackVars <- V.mapM declareStack stacks
       scalarVars <- V.mapM declareScalar scalars
+      rowVars <- V.mapM declareRow rows
       scheme <- Forall
         (S.fromList (V.toList stackVars))
         (S.fromList (V.toList scalarVars))
-        S.empty
+        (S.fromList (V.toList rowVars))
         <$> fromAnnoType' HiNone type_
       return $ TyQuantified scheme origin
       where
+      declareRow name = do
+        var <- lift freshRowIdM
+        modify $ \env -> env
+          { envRows = M.insert name var (envRows env) }
+        return var
       declareScalar name = do
         var <- lift freshScalarIdM
         modify $ \env -> env
@@ -119,7 +134,7 @@ fromAnno annotated (Anno annoType annoLoc) = do
   makeFunction origin leftStack leftScalars rightStack rightScalars effects = do
     (consts, vars) <- partitionEithers . V.toList <$> V.mapM fromEffect effects
     e <- case vars of
-      [] -> TyVar <$> lift freshRowIdM <*> pure origin
+      [] -> gets envRow
       [var] -> return var
       _ -> lift . liftFailWriter . throwMany . (:[]) . ErrorGroup
         $ item Error
@@ -142,9 +157,15 @@ annoEffectVar
   -> Location
   -> Annotated
   -> Converted (Either (Type Eff) (Type EffRow))
-annoEffectVar name loc annotated = case name of
-  "io" -> return $ Left (TyEff EffIo origin)
-  _ -> unknown name loc
+annoEffectVar name loc annotated = do
+  existing <- gets $ M.lookup name . envRows
+  case existing of
+    Just var -> return $ Right (TyVar var origin)
+    Nothing -> case name of
+      "exit" -> return $ Left (TyEff EffExit origin)
+      "fail" -> return $ Left (TyEff EffFail origin)
+      "io" -> return $ Left (TyEff EffIo origin)
+      _ -> unknown name loc
   where origin = Origin (HiVar name annotated) loc
 
 -- | Gets a scalar variable by name from the environment.

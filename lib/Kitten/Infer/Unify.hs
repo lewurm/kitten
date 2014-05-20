@@ -33,6 +33,7 @@ import Kitten.Types
 import Kitten.Util.FailWriter
 import Kitten.Util.Maybe
 import Kitten.Util.Text (ToText(..))
+import Kitten.Util.Tuple
 
 -- | Simplifies and unifies two types.
 unify
@@ -86,7 +87,7 @@ instance Unification Scalar where
     where commutative = unification type2 type1 program
 
 instance Unification EffRow where
-  unification type1 type2 program = case (type1, type2) of
+  unification type1 type2 program = case both orderEffect (type1, type2) of
     _ | type1 == type2 -> Right program
     (l :+ r, s)
       | Just (rewritten, substitution, program') <- rowIso program l s
@@ -115,8 +116,10 @@ instance Unification Eff where
         (originLocation $ inferenceOrigin program) type1 type2
 
 effectTail :: Type EffRow -> Type EffRow
-effectTail (_ :+ a) = a
-effectTail a = a
+effectTail (_ :+ a) = effectTail a
+effectTail a@TyConst{} = a
+effectTail a@TyVar{} = a
+effectTail a@TyPure{} = a
 
 rowIso
   :: Program
@@ -140,34 +143,6 @@ rowIso p l (TyVar a o) = let
   in return (res, Just (a, res), p')
 
 rowIso _ _ _ = Nothing
-
-{-
-rowIso p lin (l1 :+ r1) (l2 :+ r2)
-  | l1 == lin && l1 == l2 && r1 == r2 = (Nothing, p)
-rowIso p lin (l'1 :+ r) (l :+ l'2 :+ r')
-  | l == lin && l'1 /= l && l'1 == l'2
-  = rowIso p lin r (l :+ r')
-rowIso p lin (TyVar a) (l :+ _) = let
-  (b, p') = freshVar (inferenceOrigin p) p
-  in (Just (a, l :+ b), p')
--}
-
-{-
-rewriteEffect
-  :: Type Eff
-  -> Type EffRow
-  -> Program
-  -> Maybe (Type Eff, Type EffRow, Maybe (KindedId EffRow), Program)
-
-rewriteEffect a (e :+ r) program
-  = Just $ if a == e
-    then (a, e :+ r, Nothing, program)
-    else (e, a :+ r, Nothing, program)
-rewriteEffect a (TyVar var _) program = let
-  (x, program') = freshVar (inferenceOrigin program) program
-  in Just (a, x, Just var, declare var (a :+ x) program')
-rewriteEffect _ _ _ = Nothing
--}
 
 unificationError
   :: forall (a :: Kind). (ReifyKind a, TidyType a, ToText (Type a))

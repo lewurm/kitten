@@ -9,10 +9,10 @@
 
 ticTacToe
 
-def ticTacToe (->):
+def ticTacToe (-> +exit +io):
   { game playAgain } loopWhile
 
-def game (->):
+def game (-> +exit +io):
   newBoard 'x' gameLoop -> finalBoard winner;
 
   newline
@@ -24,7 +24,7 @@ def game (->):
 
   finalBoard printBoard
 
-def gameLoop ([char] char -> [char] char):
+def gameLoop ([char] char -> [char] char +exit +io):
   -> board player;
 
   board getWinner -> winner;
@@ -34,7 +34,7 @@ def gameLoop ([char] char -> [char] char):
     board player askTurn
     player nextPlayer gameLoop
 
-def askTurn ([char] char -> [char]):
+def askTurn ([char] char -> [char] +exit +io):
   -> board player;
 
   board printBoard
@@ -50,7 +50,7 @@ def askTurn ([char] char -> [char]):
 
   option (mxy): -> xy;
     board
-    xy first xy rest xyToCellNumber
+    xy unpair xyToCellNumber
     player editBoard
   else:
     if (input "q" eqString):
@@ -75,10 +75,10 @@ def checkSets (-> [[int]]):
 // ' ', 'x', or 'o'
 def getCheckSetWinner ([char] [int] -> char):
   getAll -> players;
-  if (players { {'x' eqChar} {false} option___else_ } all):
+  if (players { option {'x' eqChar} else {false} } all):
     'x'
   else:
-    if (players { {'o' eqChar} {false} option___else_ } all):
+    if (players { option {'o' eqChar} else {false} } all):
       'o'
     else:
       ' '
@@ -110,7 +110,7 @@ def getWinner ([char] -> char):
         else:
           '*'
 
-def playAgain (-> bool):
+def playAgain (-> bool +io):
   "Play another game? [yN] " prompt -> input;
   if (input isYes):
     newline true
@@ -131,7 +131,7 @@ def editBoard ([char] int char -> [char]):
   -> number player;
   number cellNumberToIndex @= player
 
-def printBoard ([char] ->):
+def printBoard ([char] -> +io):
   showBoard print
 
 def showBoard ([char] -> [char]):

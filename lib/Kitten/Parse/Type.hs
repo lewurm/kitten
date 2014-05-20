@@ -7,7 +7,7 @@ module Kitten.Parse.Type
   ) where
 
 import Control.Applicative
-import Data.Either
+import Data.List
 import Data.Text (Text)
 import Data.Vector (Vector)
 
@@ -30,16 +30,34 @@ typeDefType = locate $ Anno <$> baseType
 type_ :: Parser AnType
 type_ = (<?> "type") $ try functionType <|> baseType
 
+data Variable
+  = ScalarVariable !Text
+  | StackVariable !Text
+  | RowVariable !Text
+
+partitionVariables :: [Variable] -> ([Text], [Text], [Text])
+partitionVariables = foldl' go ([], [], [])
+  where
+  go (stacks, scalars, rows) = \case
+    StackVariable name -> (name : stacks, scalars, rows)
+    ScalarVariable name -> (stacks, name : scalars, rows)
+    RowVariable name -> (stacks, scalars, name : rows)
+
 quantified :: Parser AnType -> Parser AnType
 quantified thing = do
-  (stacks, scalars) <- partitionEithers <$> between
+  (stacks, scalars, rows) <- partitionVariables <$> between
     (match $ TkBlockBegin NormalBlockHint)
     (match TkBlockEnd)
     (variable `sepEndBy1` match TkComma)
-  AnQuantified (V.fromList stacks) (V.fromList scalars) <$> thing
+  AnQuantified (V.fromList stacks) (V.fromList scalars) (V.fromList rows)
+    <$> thing
   where
-  variable :: Parser (Either Text Text)
-  variable = Left <$> (dot *> word) <|> Right <$> word
+  variable :: Parser Variable
+  variable = choice
+    [ StackVariable <$> (dot *> word)
+    , RowVariable <$> (plus *> word)
+    , ScalarVariable <$> word
+    ]
 
 dot, plus :: Parser Token
 dot = match (TkOperator ".")

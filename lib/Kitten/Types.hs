@@ -16,6 +16,7 @@
 module Kitten.Types where
 
 import Control.Applicative
+import Control.Arrow
 import Control.Monad.Fix
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
@@ -25,6 +26,7 @@ import Data.Function
 import Data.Functor.Identity
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
+import Data.List
 import Data.Maybe
 import Data.Monoid
 import Data.Set (Set)
@@ -546,36 +548,77 @@ instance Show Ctor where
   show = T.unpack . toText
 
 data EffCtor
-  = EffIo
-  deriving (Eq)
+  = EffExit
+  | EffFail
+  | EffIo
+  deriving (Eq, Ord)
 
-tyIo :: Origin -> Type EffRow
-tyIo o = TyEff EffIo o :+ TyPure o
+tyExit, tyFail, tyIo :: Origin -> Type EffRow -> Type EffRow
+tyExit o e = TyEff EffExit o :+ e
+tyFail o e = TyEff EffFail o :+ e
+tyIo o e = TyEff EffIo o :+ e
 
 instance ToText EffCtor where
   toText = \case
+    EffExit -> "exit"
+    EffFail -> "fail"
     EffIo -> "io"
 
 instance Show EffCtor where
   show = T.unpack . toText
 
-instance Eq (Type a) where
+instance Eq (Type Scalar) where
   (a :& b) == (c :& d) = (a, b) == (c, d)
-  (a :+ b :+ c) == (d :+ e :+ f)
-    = (a == d && b == e || a == e && b == e) && c == f
-  (a :+ b) == (c :+ d) = (a, b) == (c, d)
-  (a :. b) == (c :. d) = (a, b) == (c, d)
   (:?) a == (:?) b = a == b
   (a :| b) == (c :| d) = (a, b) == (c, d)
   TyConst a _ == TyConst b _ = a == b
   TyCtor a _ == TyCtor b _ = a == b
-  TyEff a _ == TyEff b _ = a == b
-  TyEmpty{} == TyEmpty{} = True
   TyFunction a b c _ == TyFunction d e f _ = (a, b, c) == (d, e, f)
-  TyPure{} == TyPure{} = True
   TyQuantified a _ == TyQuantified b _ = a == b
   TyVar a _ == TyVar b _ = a == b
   TyVector a _ == TyVector b _ = a == b
+  _ == _ = False
+
+instance Eq (Type Stack) where
+  (a :. b) == (c :. d) = (a, b) == (c, d)
+  TyConst a _ == TyConst b _ = a == b
+  TyEmpty{} == TyEmpty{} = True
+  TyVar a _ == TyVar b _ = a == b
+  _ == _ = False
+
+instance Ord (Type Eff) where
+  TyConst a _ `compare` TyConst b _ = compare a b
+  TyConst{} `compare` _ = LT
+  _ `compare` TyConst{} = GT
+
+  TyEff a _ `compare` TyEff b _ = compare a b
+  TyEff{} `compare` _ = LT
+  _ `compare` TyEff{} = GT
+
+  TyVar a _ `compare` TyVar b _ = compare a b
+
+instance Eq (Type EffRow) where
+  (==) = match `on` orderEffect
+    where
+    match :: Type EffRow -> Type EffRow -> Bool
+    match (a :+ b) (c :+ d) = (a, b) == (c, d)
+    match (TyConst a _) (TyConst b _) = a == b
+    match TyPure{} TyPure{} = True
+    match (TyVar a _) (TyVar b _) = a == b
+    match _ _ = False
+
+orderEffect :: Type EffRow -> Type EffRow
+orderEffect type_ = let
+  (es, e) = extract type_
+  in foldr (:+) e . map head . groupBy (==) $ sort es
+  where
+  extract (a :+ b) = first (a :) $ extract b
+  extract a = ([], a)
+
+instance Eq (Type Eff) where
+  TyConst a _ == TyConst b _ = a == b
+  TyEff a _ == TyEff b _ = a == b
+  TyVar a _ == TyVar b _ = a == b
   _ == _ = False
 
 instance Show (Type Scalar) where
@@ -972,7 +1015,7 @@ data AnType
   | AnChoice !AnType !AnType
   | AnOption !AnType
   | AnPair !AnType !AnType
-  | AnQuantified !(Vector Text) !(Vector Text) !AnType
+  | AnQuantified !(Vector Text) !(Vector Text) !(Vector Text) !AnType
   | AnStackFunction
     !Text !(Vector AnType) !Text !(Vector AnType) !(Vector Text)
   | AnVar !Text
