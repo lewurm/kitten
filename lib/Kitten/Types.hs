@@ -817,6 +817,7 @@ data Token
   | TkData
   | TkDef
   | TkDefault
+  | TkForeign
   | TkGroupBegin
   | TkGroupEnd
   | TkFloat !Double
@@ -849,6 +850,7 @@ instance Eq Token where
   TkData         == TkData         = True
   TkDef          == TkDef          = True
   TkDefault      == TkDefault      = True
+  TkForeign      == TkForeign      = True
   TkGroupBegin   == TkGroupBegin   = True
   TkGroupEnd     == TkGroupEnd     = True
   TkFloat a      == TkFloat b      = a == b
@@ -884,6 +886,7 @@ instance Show Token where
     TkData -> "data"
     TkDef -> "def"
     TkDefault -> "default"
+    TkForeign -> "foreign"
     TkIgnore -> "_"
     TkInfix -> "infix"
     TkInfixLeft -> "infix_left"
@@ -951,6 +954,7 @@ data TypeConstructor = TypeConstructor
 
 data Fragment a = Fragment
   { fragmentDefs :: !(HashMap Text (Def a))
+  , fragmentForeignImports :: [Import]
   , fragmentImports :: [Import]
   , fragmentOperators :: [Operator]
   , fragmentTerm :: !a
@@ -960,6 +964,7 @@ data Fragment a = Fragment
 termFragment :: a -> Fragment a
 termFragment term = Fragment
   { fragmentDefs = H.empty
+  , fragmentForeignImports = []
   , fragmentImports = []
   , fragmentOperators = []
   , fragmentTerm = term

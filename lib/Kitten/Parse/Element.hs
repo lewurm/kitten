@@ -15,6 +15,7 @@ import Kitten.Types
 
 data Element
   = DefElement (Def ParsedTerm)
+  | ForeignImportElement Import
   | ImportElement Import
   | OperatorElement Operator
   | TermElement ParsedTerm
@@ -22,6 +23,7 @@ data Element
 
 data Partitioned = Partitioned
   { partDefs :: [Def ParsedTerm]
+  , partForeignImports :: [Import]
   , partImports :: [Import]
   , partOperators :: [Operator]
   , partTerms :: [ParsedTerm]
@@ -30,11 +32,13 @@ data Partitioned = Partitioned
 
 partitionElements :: Location -> [Element] -> Fragment ParsedTerm
 partitionElements loc
-  = fromPartitioned loc . foldr go (Partitioned [] [] [] [] [])
+  = fromPartitioned loc . foldr go (Partitioned [] [] [] [] [] [])
   where
   go element acc = case element of
     DefElement def -> acc
       { partDefs = def : partDefs acc }
+    ForeignImportElement import_ -> acc
+      { partForeignImports = import_ : partForeignImports acc }
     ImportElement import_ -> acc
       { partImports = import_ : partImports acc }
     OperatorElement operator -> acc
@@ -53,6 +57,7 @@ fromPartitioned loc Partitioned{..} = Fragment
         -> map (ctorName &&& defineConstructor typeDef)
           . V.toList $ typeDefConstructors typeDef)
       partTypes
+  , fragmentForeignImports = partForeignImports
   , fragmentImports = partImports
   , fragmentOperators = partOperators
   , fragmentTerm = TrCompose StackAny (V.fromList partTerms) loc

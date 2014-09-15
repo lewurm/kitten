@@ -130,6 +130,7 @@ token = (<?> "token") . located $ choice
       "def" -> TkDef
       "default" -> TkDefault
       "false" -> TkBool False
+      "foreign" -> TkForeign
       "infix" -> TkInfix
       "infix_left" -> TkInfixLeft
       "infix_right" -> TkInfixRight

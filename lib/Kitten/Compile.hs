@@ -7,6 +7,7 @@ module Kitten.Compile
   ) where
 
 import Control.Applicative
+import Control.Arrow ((&&&))
 import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Either
@@ -15,12 +16,15 @@ import Data.List
 import Data.Monoid
 import Data.Set (Set)
 import Data.Text (Text)
+import Language.C
+import Language.C.System.GCC
 import System.Directory
 import System.FilePath
 import System.IO
 import System.IO.Error
-import Text.Parsec.Error
+import Text.Parsec.Error as Parsec
 import Text.Parsec.Pos
+import Text.PrettyPrint (render)
 
 import qualified Data.HashMap.Strict as H
 import qualified Data.Set as S
@@ -43,7 +47,7 @@ import Kitten.Util.Monad
 import qualified Kitten.IdMap as Id
 import qualified Kitten.Util.Text as T
 
-liftParseError :: Either ParseError a -> Either [ErrorGroup] a
+liftParseError :: Either Parsec.ParseError a -> Either [ErrorGroup] a
 liftParseError = mapLeft ((:[]) . parseError)
 
 parseSource
@@ -68,9 +72,13 @@ compile config@Config{..} program
   substituted <- hoistEither
     =<< lift (substituteImports configLibraryDirectories parsed)
 
+  foreignSubstituted <- hoistEither
+    =<< lift (substituteForeignImports configLibraryDirectories substituted)
+
   -- Applicative rewriting must take place after imports have been
   -- substituted, so that all operator declarations are in scope.
-  (postfix, program') <- hoistEither . mapLeft (:[]) $ rewriteInfix program substituted
+  (postfix, program') <- hoistEither . mapLeft (:[])
+    $ rewriteInfix program foreignSubstituted
   resolved <- hoistEither $ resolve postfix program'
 
   when configDumpResolved . lift $ hPrint stderr resolved
@@ -111,8 +119,9 @@ compile config@Config{..} program
 locateImport
   :: [FilePath]
   -> Text
+  -> Maybe Text
   -> IO [FilePath]
-locateImport libraryDirectories importName = do
+locateImport libraryDirectories importName extension = do
   currentDirectory <- getCurrentDirectory
 
   let
@@ -129,8 +138,12 @@ locateImport libraryDirectories importName = do
   where
   canonicalImport :: FilePath -> IO (Maybe FilePath)
   canonicalImport path = catchIOError
-    (Just <$> canonicalizePath (path </> T.unpack importName <.> "ktn"))
+    (Just <$> canonicalizePath (extend $ path </> T.unpack importName))
     $ \e -> if isDoesNotExistError e then return Nothing else ioError e
+
+  extend = case extension of
+    Just ext -> (<.> T.unpack ext)
+    Nothing -> id
 
 substituteImports
   :: [FilePath]
@@ -164,7 +177,7 @@ substituteImports libraryDirectories fragment = runEitherT $ do
     in if name `S.member` seenModules
       then go remainingModules seenModules acc
       else do
-        possible <- lift $ locateImport libraryDirectories name
+        possible <- lift $ locateImport libraryDirectories name (Just "ktn")
         case possible of
           [filename] -> do
             source <- lift $ T.readFileUtf8 filename
@@ -180,4 +193,30 @@ substituteImports libraryDirectories fragment = runEitherT $ do
             ["missing import '", name, "'"]
           _ -> err location $ T.concat
             ["ambiguous import '", name, "'"]
+  err loc = left . (:[]) . oneError . CompileError loc Error
+
+substituteForeignImports
+  :: [FilePath]
+  -> Fragment ParsedTerm
+  -> IO (Either [ErrorGroup] (Fragment ParsedTerm))
+substituteForeignImports libraryDirectories fragment = runEitherT $ do
+  foreignDefs <- mapM go (fragmentForeignImports fragment)
+  return fragment
+    { fragmentDefs = fragmentDefs fragment
+      <> H.fromList (map (defName &&& id) foreignDefs)
+    }
+  where
+  go :: Import -> EitherT [ErrorGroup] IO (Def ParsedTerm)
+  go import_ = do
+    possible <- lift
+      $ locateImport libraryDirectories (importName import_) Nothing
+    case possible of
+      [filename] -> do
+        parseResult <- lift $ parseCFile (newGCC "gcc") Nothing ["-U__BLOCKS__"] filename
+        lift $ print parseResult
+        error "TODO Use C parse result."
+      [] -> err (importLocation import_) $ T.concat
+        ["missing foreign import '", importName import_, "'"]
+      _ -> err (importLocation import_) $ T.concat
+        ["ambiguous foreign import '", importName import_, "'"]
   err loc = left . (:[]) . oneError . CompileError loc Error

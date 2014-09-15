@@ -66,6 +66,7 @@ fragment = do
 element :: Parser Element
 element = choice
   [ DefElement <$> def 
+  , ForeignImportElement <$> foreignImport
   , ImportElement <$> import_
   , OperatorElement <$> operatorDeclaration
   , TermElement <$> term
@@ -112,6 +113,18 @@ typeConstructor = (<?> "type constructor") . locate $ do
     { ctorFields = fields
     , ctorLocation = loc
     , ctorName = name
+    }
+
+foreignImport :: Parser Import
+foreignImport = (<?> "foreign import") . locate $ do
+  void (match TkForeign)
+  void (match TkImport)
+  path <- mapOne $ \case
+    TkText path -> Just path
+    _ -> Nothing
+  return $ \loc -> Import
+    { importName = path
+    , importLocation = loc
     }
 
 import_ :: Parser Import
