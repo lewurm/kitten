@@ -212,8 +212,13 @@ substituteForeignImports libraryDirectories fragment = runEitherT $ do
       $ locateImport libraryDirectories (importName import_) Nothing
     case possible of
       [filename] -> do
-        parseResult <- lift $ parseCFile (newGCC "gcc") Nothing ["-U__BLOCKS__"] filename
-        lift $ print parseResult
+        let
+          path = Nothing
+          defines =
+            [ "-fno-blocks"  -- Disable blocks support on Mac OS X.
+            ]
+        _parseResult <- lift
+          $ parseCFile (newGCC "gcc") path defines filename
         error "TODO Use C parse result."
       [] -> err (importLocation import_) $ T.concat
         ["missing foreign import '", importName import_, "'"]
